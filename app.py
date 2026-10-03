@@ -31,7 +31,7 @@ def api_get(path, token, params):
         timeout=10,
     )
     if r.status_code == 401:
-        raise PermissionError("Upstox rejected the token (401). It expires daily (~3:30 AM), must be the ACCESS token (not API key/secret), and on Streamlit Cloud you must reboot the app after editing secrets. Also clear the sidebar token box. Upstox said: " + r.text[:200])
+        raise PermissionError("Upstox rejected the token (401). It expires daily (~3:30 AM), must be the ACCESS token (not API key/secret), and on Streamlit Cloud you must reboot the app after editing secrets. Also clear the sidebar token box.")
     r.raise_for_status()
     j = r.json()
     if j.get("status") != "success":
@@ -57,75 +57,6 @@ def get_expiries(token):
 
 def get_chain(token, expiry):
     return api_get("/option/chain", token, {"instrument_key": NIFTY_KEY, "expiry_date": expiry})
-
-
-# ============================================================
-# NSE PUBLIC SOURCE (no token needed, best effort)
-# ============================================================
-NSE_HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) "
-                  "Chrome/124.0 Safari/537.36",
-    "Accept": "application/json,text/plain,*/*",
-    "Accept-Language": "en-US,en;q=0.9",
-    "Referer": "https://www.nseindia.com/option-chain",
-}
-
-
-@st.cache_resource(ttl=240, show_spinner=False)
-def nse_session():
-    """NSE needs cookies from its home page first; reuse the session for ~4 minutes."""
-    sess = requests.Session()
-    sess.headers.update(NSE_HEADERS)
-    sess.get("https://www.nseindia.com", timeout=10)
-    sess.get("https://www.nseindia.com/option-chain", timeout=10)
-    return sess
-
-
-def get_nse_records():
-    url = "https://www.nseindia.com/api/option-chain-indices"
-    for attempt in range(2):
-        try:
-            r = nse_session().get(url, params={"symbol": "NIFTY"}, timeout=10)
-            r.raise_for_status()
-            rec = r.json().get("records")
-            if rec and rec.get("data"):
-                return rec
-        except Exception:
-            pass
-        nse_session.clear()  # drop stale cookies and retry once
-    raise RuntimeError(
-        "NSE did not return data. NSE often blocks cloud servers (like Streamlit Cloud) "
-        "and returns nothing outside market hours. Run the app on your own PC "
-        "(streamlit run app.py) or switch to Demo."
-    )
-
-
-def nse_expiries(rec):
-    ex = rec.get("expiryDates", [])
-    return sorted(ex, key=lambda e: datetime.strptime(e, "%d-%b-%Y"))
-
-
-def nse_to_chain(rec, expiry):
-    """Convert NSE JSON into the same shape the app uses for Upstox."""
-    spot = rec.get("underlyingValue")
-    out = []
-    for d in rec["data"]:
-        if d.get("expiryDate") != expiry:
-            continue
-        ce, pe = d.get("CE", {}), d.get("PE", {})
-        spot = spot or ce.get("underlyingValue") or pe.get("underlyingValue")
-
-        def md(x):
-            oi = x.get("openInterest", 0) or 0
-            return {"ltp": x.get("lastPrice", 0), "oi": oi, "prev_oi": oi - (x.get("changeinOpenInterest", 0) or 0)}
-
-        out.append({
-            "strike_price": float(d["strikePrice"]),
-            "underlying_spot_price": spot,
-            "call_options": {"market_data": md(ce), "option_greeks": {"iv": ce.get("impliedVolatility"), "delta": None}},
-            "put_options": {"market_data": md(pe), "option_greeks": {"iv": pe.get("impliedVolatility"), "delta": None}},
-        })
-    return out
 
 
 # ============================================================
@@ -303,16 +234,13 @@ except Exception:
     default_token = ""
 default_token = default_token or os.getenv("UPSTOX_ACCESS_TOKEN", "")
 
-source = st.sidebar.radio("Data source", ["NSE (no token)", "Upstox (token)", "Demo (sample)"], index=0)
-demo = source.startswith("Demo")
-nse = source.startswith("NSE")
-upstox = source.startswith("Upstox")
-token = st.sidebar.text_input("Upstox access token", value=default_token, type="password", disabled=not upstox)
+demo = st.sidebar.checkbox("Demo mode (sample data, no token)", value=not default_token)
+token = st.sidebar.text_input("Upstox access token", value=default_token, type="password", disabled=demo)
 # clean common paste mistakes: spaces, quotes, "Bearer " prefix
 token = (token or "").strip().strip("\"'").strip()
 if token.lower().startswith("bearer "):
     token = token[7:].strip()
-if token and upstox:
+if token and not demo:
     src = "sidebar box" if token != default_token.strip().strip("\"'") else "secrets/env"
     st.sidebar.caption(f"Using token from {src}: length {len(token)}, ends with …{token[-4:]}")
     if len(token) < 100:
@@ -333,8 +261,8 @@ if st.sidebar.button("Reset history"):
 # ============================================================
 st.title("📈 NIFTY 50 Live Price + Option OI Monitor")
 
-if upstox and not token:
-    st.info("Enter your Upstox access token, or choose NSE / Demo as the data source.")
+if not demo and not token:
+    st.info("Enter your Upstox access token, or tick Demo mode, in the sidebar.")
     st.stop()
 
 st_autorefresh(interval=refresh_s * 1000, key="auto")
@@ -344,11 +272,6 @@ try:
         st.info("🧪 Demo mode: synthetic sample data, not real market prices.")
         expiry = st.sidebar.selectbox("Expiry", ["DEMO"], index=0)
         chain = make_sample_chain()
-    elif nse:
-        rec = get_nse_records()
-        expiries = nse_expiries(rec)
-        expiry = st.sidebar.selectbox("Expiry", expiries, index=0)
-        chain = nse_to_chain(rec, expiry)
     else:
         expiries = get_expiries(token)
         if not expiries:
@@ -357,7 +280,7 @@ try:
         expiry = st.sidebar.selectbox("Expiry", expiries, index=0)
         chain = get_chain(token, expiry)
 except Exception as e:
-    st.error(f"Data error: {e}")
+    st.error(f"API error: {e}")
     st.stop()
 
 if not chain:
