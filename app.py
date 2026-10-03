@@ -31,7 +31,7 @@ def api_get(path, token, params):
         timeout=10,
     )
     if r.status_code == 401:
-        raise PermissionError("Access token invalid or expired. Generate a fresh Upstox token.")
+        raise PermissionError("Upstox rejected the token (401). It expires daily (~3:30 AM), must be the ACCESS token (not API key/secret), and on Streamlit Cloud you must reboot the app after editing secrets. Also clear the sidebar token box.")
     r.raise_for_status()
     j = r.json()
     if j.get("status") != "success":
@@ -236,6 +236,15 @@ default_token = default_token or os.getenv("UPSTOX_ACCESS_TOKEN", "")
 
 demo = st.sidebar.checkbox("Demo mode (sample data, no token)", value=not default_token)
 token = st.sidebar.text_input("Upstox access token", value=default_token, type="password", disabled=demo)
+# clean common paste mistakes: spaces, quotes, "Bearer " prefix
+token = (token or "").strip().strip("\"'").strip()
+if token.lower().startswith("bearer "):
+    token = token[7:].strip()
+if token and not demo:
+    src = "sidebar box" if token != default_token.strip().strip("\"'") else "secrets/env"
+    st.sidebar.caption(f"Using token from {src}: length {len(token)}, ends with …{token[-4:]}")
+    if len(token) < 100:
+        st.sidebar.warning("Upstox access tokens are long (200+ chars, JWT starting with 'eyJ'). This looks like an API key/secret instead.")
 refresh_s = st.sidebar.slider("Refresh every (sec)", 3, 60, 5)
 n_side = st.sidebar.slider("Strikes each side of ATM", 2, 15, 5)
 window = st.sidebar.slider("Signal window (refreshes)", 2, 60, 12)
